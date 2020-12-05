@@ -1,0 +1,107 @@
+library(magrittr)
+library(rlang)
+
+COHORT_COL = "cohort_str"
+GRADE_COL = "grade"
+YEAR_COL = "year"
+RELATIVE_AGE_COL = "relative_age"
+ABSOLUTE_AGE_APRIL_COL = "absolute_age_in_april"
+ABSOLUTE_AGE_JUNE_COL = "absolute_age_in_june"
+ABSOLUTE_AGE = "absolute_age"
+MST_ID_COL = "mst_id"
+# PATH = "./note_book/covid19/data.csv"
+PATH = "./data/data.csv"
+
+
+#model1
+regression_template_model1 = function(
+  dfx, target, grade_use
+) {
+  #target = "kokugo_level"
+  #grade_use = 6
+  year_covid_robust1 = 2019 
+  # get control group's cohort
+  cohort_treatment = dfx %>% 
+    dplyr::filter(!!sym(GRADE_COL) == grade_use, !!sym(YEAR_COL) == year_covid_robust1) %>% 
+    dplyr::pull(!!sym(COHORT_COL)) %>% unique() %>% sort()
+  if (length(cohort_treatment) != 1) {stop("ERROR")}
+  grades_treatment = dfx %>%
+    dplyr::filter(!!sym(COHORT_COL) == cohort_treatment) %>%
+    dplyr::pull(!!sym(GRADE_COL)) %>% 
+    unique() %>% sort() %>% tail(3)
+  cohorts_alternative = dfx %>% dplyr::pull(COHORT_COL) %>% unique() %>% setdiff(cohort_treatment)
+  cohorts_control = c()
+  for (cohort in cohorts_alternative) {
+    grades_cohort = dfx %>%
+      dplyr::filter(!!sym(COHORT_COL) == cohort) %>%
+      dplyr::pull(!!sym(GRADE_COL)) %>% unique()
+    if (sum(!grades_treatment %in% grades_cohort) == 0) {
+      cohorts_control = c(cohorts_control, cohort)
+    }
+  }
+  print(
+    "${target} ${grade_use} ${grades_treatment} ${grades_target} ${cohort_treatment}${cohorts_control} cohortの学年 対象学年" %>% 
+      stringr::str_interp(list(
+        target = target, grade_use = grade_use, grades_treatment = grades_treatment, 
+        grades_target = grades_treatment, cohorts_control = cohorts_control, cohort_treatment = cohort_treatment
+      ))
+  )
+  # get mst_ids
+  mst_ids_treatment = dfx %>%
+    dplyr::filter(!!sym(COHORT_COL) == cohort_treatment) %>%
+    dplyr::pull(!!sym(MST_ID_COL)) %>% unique()
+  mst_ids_control = dfx %>%
+    dplyr::filter(!!sym(COHORT_COL) %in% cohorts_control) %>%
+    dplyr::pull(!!sym(MST_ID_COL)) %>% unique()
+  # set formula
+  fm_use = "${target} ~ as.factor(year_after_covid) + relative_age + I(relative_age**2) + I(relative_age**3) | grade + mst_id | 0 | mst_id" %>%
+    stringr::str_interp(list(target = target)) %>%
+    as.formula()
+  # extract
+  dfx_use = dfx %>%
+    dplyr::filter(
+      !!sym(MST_ID_COL) %in% c(mst_ids_treatment, mst_ids_control),
+      !!sym(GRADE_COL) %in% grades_treatment,
+    ) %>%
+    dplyr::mutate(
+      year_after_covid = dplyr::case_when(!!sym(YEAR_COL)==2019~1, TRUE~0)
+    ) %>%
+    dplyr::select(all.vars(fm_use), YEAR_COL, GRADE_COL, COHORT_COL) %>%
+    tidyr::drop_na()
+  print(dfx_use %>% dplyr::group_by(!!sym(YEAR_COL), !!sym(GRADE_COL), !!sym(COHORT_COL)) %>% dplyr::summarise(obs = dplyr::n()))
+  # analysis
+  result = lfe::felm(fm_use, dfx_use)
+  return(list(
+    tidy = result %>% broom::tidy() %>% dplyr::mutate(name = paste("model1", target, grade_use, sep = "_")),
+    glance = result %>% broom::glance() %>% dplyr::mutate(name = paste("model1", target, grade_use, sep = "_", obs = dfx_use %>% nrow()))
+  ))
+}
+
+
+main = function() {
+  df = data.table::fread(PATH) %>%
+    tidyr::as_tibble() %>%
+    dplyr::mutate(
+      !!sym(COHORT_COL) := stringi::stri_c("cohort", year - grade, sep = ""),
+      kokugo_level = dplyr::case_when(dplyr::between(kokugo_level, -5.8, 5.8)~kokugo_level, TRUE~NaN),
+      math_level = dplyr::case_when(dplyr::between(math_level, -5.8, 5.8)~math_level, TRUE~NaN),
+      eng_level = dplyr::case_when(dplyr::between(eng_level, -5.8, 5.8)~eng_level, TRUE~NaN)
+    )
+  regression_template_model1(dfx = df, grade_use = 7, target = "math_level")
+  result = c()
+  for (target in c("kokugo_level","math_level")) {
+    for (grade_use in 5:9) {
+      res = regression_template_model1(dfx = df, grade_use = grade_use, target = target)
+      result = c(result,list(res))
+    }
+  }
+  tidy = result %>% purrr::map(~ .x$tidy) %>% purrr::reduce(dplyr::bind_rows)
+  glance = result %>% purrr::map(~ .x$glance) %>% purrr::reduce(dplyr::bind_rows)  
+  # save
+  savefolder = "./result/task1"
+  dir.create(savefolder, recursive = TRUE)
+  write.csv(x = tidy, file = file.path(savefolder, 'summary_tidy_19.csv'))
+  write.csv(x = glance, file = file.path(savefolder, 'summary_glance_19.csv'))
+  gc(reset = TRUE)
+}
+
